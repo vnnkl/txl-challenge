@@ -1,13 +1,13 @@
 import express from 'express';
 import sqlite3 from 'sqlite3';
-import { open } from 'sqlite'
+import Database from 'better-sqlite3';
 import sha256 from 'sha256';
 import * as dotenv from "dotenv";
-import bodyParser from 'body-parser';
+
 
 dotenv.config();
 sqlite3.verbose();
-
+const db = new Database('/tmp/database.db')
 const app = express();
 app.use(express.json());
 
@@ -19,107 +19,82 @@ interface Transaction {
 
 const port = process.env['PORT'] || 9000; // def port
 
-const mempool = [];
+const mempool: { txHash: string; body: any; }[] = [];
+// latest blockHeight 
+let blockNo = Number(getBlockHeight()) + 1;
 
-function insertTransactionToDB(txString: string, blockNo: number) { 
-open(
-  '/tmp/database.db',
-  ).then(async (db) => {
+function insertTransactionToDB(txString: string, blockNo: number) {
+  const tx = JSON.parse(txString);
 
-    const tx = JSON.parse(txString);
-
-    try {
-      
-      // txlBlocks (blockNo INTEGER, txHash TEXT 
-      // txlTransactions (sender TEXT, receiver TEXT, amount INTEGER, txhash TEXT)
-
-      await db.exec(`INSERT INTO txlTransactions VALUES ("${tx.from}", "${tx.to}", "${tx.amount}", "${sha256(txString)}" )`);
-
-    } catch (error) {
-        console.log('we did run into an error during database call')
-        console.log(error)
-    }
-   
-})
+  const insertTXs = db.prepare('INSERT INTO txlTransactions VALUES (?,?,?,?)')
+  const txChanges = insertTXs.run(tx.from, tx.to, tx.amount, sha256(txString))
+  
+  const insertBlock = db.prepare('INSERT INTO txlBlocks VALUES (?,?)')
+  const blockChanges = insertBlock.run(blockNo, sha256(txString));
+  
 }
 
 function getBlockTransactions(blockNo: number) { 
-open(
-  '/tmp/database.db',
-  ).then(async (db) => {
+  const txhashes = db.prepare('SELECT txHash FROM txlBlocks where blockNo = ?').all(blockNo);
+  const result = Object.values(txhashes).map((result) => result.txHash)
 
+  return result
 
-    try {
-      
-      // txlBlocks (blockNo INTEGER, txHash TEXT 
-      // txlTransactions (sender TEXT, receiver TEXT, amount INTEGER, txhash TEXT)
-      const getAllTxs = await db.all('SELECT txHash FROM txlBlocks where blockNo = ?', blockNo);
-      return getAllTxs;
-    } catch (error) {
-        console.log('we did run into an error during database call')
-        console.log(error)
-    }
-   
-})
+}
+function getBlockHeight() { 
+  const blockHeight = db.prepare('SELECT MAX(blockNo) FROM txlBlocks').get();
+  return Object.values(blockHeight)[0];
+
 }
 
-function getAllReceiverTXs(receiver: string): number[] { 
-  open(
-    '/tmp/database.db',
-  ).then(async (db) => {
-    console.log(`Database opened.`)
-
-    try {
-      
-      const result = await db.get('SELECT amount FROM txlTransactions WHERE receiver = ?', receiver);
-      return result as number[];
-
-    } catch (error) {
-      console.log('we did run into an error during database call')
-      console.log(error)
-    }
-  });
-  return [];
+function getBlockNoForTX(txhash: string) { 
+  const blockNo = db.prepare('SELECT blockNo FROM txlBlocks WHERE txHash = ?').get(txhash);
+  return Object.values(blockNo)[0];
 }
 
-function getAllSenderTXs(sender: string): number[] { 
-  open(
-    '/tmp/database.db',
-  ).then(async (db) => {
-    console.log(`Database opened.`)
+// txlBlocks (blockNo INTEGER, txHash TEXT 
+// txlTransactions (sender TEXT, receiver TEXT, amount INTEGER, txhash TEXT)
 
-    try {
-      
-      // txlBlocks (blockNo INTEGER, txHash TEXT 
-      // txlTransactions (sender TEXT, receiver TEXT, amount INTEGER, txhash TEXT)
+function getAllTXsFromDB(address: string) {
+  const result = db.prepare('SELECT txHash FROM txlTransactions WHERE sender = ? OR receiver = ?').all(address, address);
+  
+  return (result );
+  
+}
 
-      const result = await db.get('SELECT amount FROM txlTransactions WHERE sender = ?', sender);
 
-      return result as number[]
+function getAllReceiverAmountsFromDB(receiver: string) {
+  const result = db.prepare('SELECT amount FROM txlTransactions WHERE receiver = ?').all(receiver);
 
-    } catch (error) {
-      console.log('we did run into an error during database call')
-      console.log(error)
-    }
-  });
-  return [];
+  return (result ? Object.values(result).map((result) => result.amount) : []) as number[];
+  
+}
+
+function getAllSenderAmountsFromDB(receiver: string) {
+  const result = db.prepare('SELECT amount FROM txlTransactions WHERE sender = ?').all(receiver);
+
+  return (result ? Object.values(result).map((result) => result.amount) : []) as number[];
+  
 }
 
 console.log('Hello World');
 console.log(`Today's Blocktime will be ${process.env['BLOCK_TIME']} seconds`);
 
-function hasEnoughBalance(sender: string, amount: number):boolean { 
+function hasEnoughBalance(sender: string, amount: number) {
   // get all receiver txs
-  const receivingTXs = getAllReceiverTXs(sender);
+  const receivingTXs = getAllReceiverAmountsFromDB(sender);
+  
   // sum amount
-  const receivingTotal = receivingTXs.reduce((sum, val) => sum + val);
+  const receivingTotal : number = receivingTXs.length>0 ? receivingTXs.reduce((sum, val) => sum + val) : 0;
+  
   // get all sender txs
-  const sendingTXs = getAllSenderTXs(sender);
+  const sendingTXs = getAllSenderAmountsFromDB(sender);
+  
   // sum amount
-  const sendingTotal = sendingTXs.reduce((sum, val) => sum + val);
+  const sendingTotal: number = sendingTXs.length>0 ? sendingTXs.reduce((sum, val) => sum + val) : 0;
   
   // check if balance is higher than amount to be sent
-  if (receivingTotal>=(sendingTotal+amount)) { 
+  if (Number(receivingTotal) >= (Number(sendingTotal) +Number(amount))) {
     return true;
   }
 
@@ -136,48 +111,73 @@ function checkValidTransaction(txJson: string) {
 /**
  * returns transactions, as list which have been saved to blockchain
 */
-app.get("/address/:addr", (req, res) => {
+app.get("/address/:addr",  (req, res) => {
   // get all tx where address is sender or receiver, as well as their block height and hash
-  const address = req.params.addr;
-  const receivingTXs = getAllReceiverTXs(address);
-  const sendingTXs = getAllSenderTXs(address);
+  const address = req.params.addr; 
+  const receivingTXs =  getAllReceiverAmountsFromDB(address);
+  const sendingTXs = getAllSenderAmountsFromDB(address);
+  
   // get blockNos for each
+  const receivingTotal: number = receivingTXs.length > 0 ? receivingTXs.reduce((sum, val) => sum + val) : 0;
+  const sendingTotal : number = sendingTXs.length>0 ? sendingTXs.reduce((sum, val) => sum + val) : 0;
+  const balance = receivingTotal - sendingTotal;
+
+  const txsNoBlock = getAllTXsFromDB(address);
+  const txsWithBlock = txsNoBlock.map((tx) => {
+    const blockNo = getBlockNoForTX(tx.txHash);
+    return {blockNo: blockNo, txHash: tx.txHash}
+  });
 
   // return reponse
-
-    res.send( "Hello world!" );
+  const response = {balance: balance, transactions: txsWithBlock}
+    res.send(response);
 });
 
 /**
  * takes transcations from body and retuns a sha256 hash if added to pool
 */
-app.post( "/transaction", ( req, res ) => {
+app.post("/transaction", async (req, res) => {
   // check for valid transaction
   const body = req.body;
-  if (checkValidTransaction(JSON.stringify(body))){ 
-    console.log('got a valid transaction with following format:');
+  if (checkValidTransaction(JSON.stringify(body))) {
 
-    // check balance of sender
-    if (hasEnoughBalance(body.from, body.amount)) {
+    // check balance of sender or for genesis user
+    if (hasEnoughBalance(body.from, body.amount) || body.from.toLowerCase() == 'genesis') {
       // sender has enough funds to send
 
-
       // put transaction into mempool
-      mempool.push({txHash: sha256(JSON.stringify(body)), body});
-
+      mempool.push({...body, txHash: sha256(JSON.stringify(body))});
+      
       // return hash as reponse
-      console.log('executed a transaction');
       res.status(200).send(sha256(JSON.stringify(body)));
 
-    } else { 
+    } else {
       // not enough balance
       res.status(400).send("not enough funds");
     }
 
-  }
+  } else {
   
-  res.status(400).send("check your transaction format");
-} );
+    res.status(400).send("check your transaction format");
+  }
+});
+
+setInterval(() => {
+  // let's create a new block
+  console.log(`Creating block ${blockNo} now with ${mempool.length} txs`);
+  const BlockTXs = mempool.map((tx) => { insertTransactionToDB(JSON.stringify(tx), blockNo) });
+
+  // Log block
+  const block = { blockNo: blockNo, txs: getBlockTransactions(blockNo) }
+  console.log(`Please welcome Block No. ${blockNo}`);
+  console.log(block);
+
+  // increment blockheight and clear mempool
+  blockNo++;
+  mempool.splice(0, mempool.length);
+
+},Number(process.env['BLOCK_TIME'])*1000);
+
 
 // start the Express server
 app.listen( port, () => {
