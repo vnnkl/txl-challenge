@@ -9,15 +9,10 @@ const db = new Database('/tmp/database.db')
 const app = express();
 app.use(express.json());
 
-interface Transaction { 
-  from: string,
-  to: string,
-  amount: number
-}
 
 const port = process.env['PORT'] || 9000; // def port
 
-const mempool: { txHash: string; body: any; }[] = [];
+const mempool: { txHash: string; body: string }[] = [];
 // latest blockHeight 
 let blockNo = Number(getBlockHeight()) + 1;
 
@@ -25,10 +20,10 @@ function insertTransactionToDB(txString: string, blockNo: number) {
   const tx = JSON.parse(txString);
 
   const insertTXs = db.prepare('INSERT INTO txlTransactions VALUES (?,?,?,?)')
-  const txChanges = insertTXs.run(tx.from, tx.to, tx.amount, sha256(txString))
+  insertTXs.run(tx.from, tx.to, tx.amount, sha256(txString))
   
   const insertBlock = db.prepare('INSERT INTO txlBlocks VALUES (?,?)')
-  const blockChanges = insertBlock.run(blockNo, sha256(txString));
+  insertBlock.run(blockNo, sha256(txString));
   
 }
 
@@ -100,7 +95,7 @@ function hasEnoughBalance(sender: string, amount: number) {
 }
 function checkValidTransaction(txJson: string) { 
   const tx = JSON.parse(txJson);
-  if (tx.hasOwnProperty('from') && tx.hasOwnProperty('to') && tx.hasOwnProperty('amount') ) { 
+  if (Object.prototype.hasOwnProperty.call(tx, "from") && Object.prototype.hasOwnProperty.call(tx, "to") && Object.prototype.hasOwnProperty.call(tx, "amount") ) { 
     return true;
   }
   return false;
@@ -163,7 +158,7 @@ app.post("/transaction", async (req, res) => {
 setInterval(() => {
   // let's create a new block
   console.log(`Creating block ${blockNo} now with ${mempool.length} txs`);
-  const BlockTXs = mempool.map((tx) => { insertTransactionToDB(JSON.stringify(tx), blockNo) });
+  mempool.map((tx) => { insertTransactionToDB(JSON.stringify(tx), blockNo) });
 
   // Log block
   const block = { blockNo: blockNo, txs: getBlockTransactions(blockNo) }
