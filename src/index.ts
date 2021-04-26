@@ -1,12 +1,10 @@
 import express from 'express';
-import sqlite3 from 'sqlite3';
 import Database from 'better-sqlite3';
 import sha256 from 'sha256';
 import * as dotenv from "dotenv";
 
 
 dotenv.config();
-sqlite3.verbose();
 const db = new Database('/tmp/database.db')
 const app = express();
 app.use(express.json());
